@@ -35,12 +35,14 @@ public class ProductionService {
     private final ReworkRecordRepo reworkRepo;
     private final ShipmentRepo shipmentRepo;
     private final TryInRecordRepo tryInRepo;
+    private final ShadeDisputeService shadeDisputeService;
     private final AuthService authService;
 
     public ProductionService(DentureOrderRepo orderRepo, ToothItemRepo itemRepo, StageRecordRepo stageRepo,
                              MaterialBatchRepo batchRepo, DesignAnnotationRepo annotationRepo,
                              OrderExceptionRepo exceptionRepo, ReworkRecordRepo reworkRepo,
                              ShipmentRepo shipmentRepo, TryInRecordRepo tryInRepo,
+                             ShadeDisputeService shadeDisputeService,
                              AuthService authService) {
         this.orderRepo = orderRepo;
         this.itemRepo = itemRepo;
@@ -51,6 +53,7 @@ public class ProductionService {
         this.reworkRepo = reworkRepo;
         this.shipmentRepo = shipmentRepo;
         this.tryInRepo = tryInRepo;
+        this.shadeDisputeService = shadeDisputeService;
         this.authService = authService;
     }
 
@@ -102,9 +105,11 @@ public class ProductionService {
         }
         if (finish) {
             record.setFinishedAt(LocalDateTime.now());
-            advanceItem(item, stage);
+            stageRepo.save(record);
+            advanceItem(item, stage, operator, record);
+        } else {
+            stageRepo.save(record);
         }
-        stageRepo.save(record);
         item.setUpdatedAt(LocalDateTime.now());
         itemRepo.save(item);
         refreshOrderStatus(order);
@@ -132,7 +137,7 @@ public class ProductionService {
         record.setEstimatedFinishAt(estimatedFinishAt);
         record.setFinishedAt(LocalDateTime.now());
         stageRepo.save(record);
-        advanceItem(item, StageType.DOCTOR_CONFIRM);
+        advanceItem(item, StageType.DOCTOR_CONFIRM, doctor, record);
         item.setUpdatedAt(LocalDateTime.now());
         itemRepo.save(item);
         refreshOrderStatus(order);
@@ -186,6 +191,7 @@ public class ProductionService {
         Map<String, Object> board = new LinkedHashMap<>();
         board.put("order", Views.order(order));
         List<ReworkRecord> orderReworks = reworkRepo.findByOrderIdOrderByIdAsc(orderId);
+        List<ShadeDispute> orderDisputes = shadeDisputeService.listByOrderInternal(orderId);
         List<Map<String, Object>> teeth = new ArrayList<>();
         for (ToothItem item : itemRepo.findByOrderIdOrderByIdAsc(orderId)) {
             Map<String, Object> tooth = Views.item(item);
@@ -196,6 +202,9 @@ public class ProductionService {
             tooth.put("reworks", orderReworks.stream()
                     .filter(r -> r.getToothItem().getId().equals(item.getId()))
                     .map(Views::rework).collect(Collectors.toList()));
+            tooth.put("shadeDisputes", orderDisputes.stream()
+                    .filter(d -> d.getToothItem().getId().equals(item.getId()))
+                    .map(Views::shadeDispute).collect(Collectors.toList()));
             teeth.add(tooth);
         }
         board.put("teeth", teeth);
@@ -248,7 +257,7 @@ public class ProductionService {
         }
     }
 
-    private void advanceItem(ToothItem item, StageType finishedStage) {
+    private void advanceItem(ToothItem item, StageType finishedStage, Account operator, StageRecord record) {
         item.setCurrentStage(finishedStage);
         item.setStatus(STATUS_AFTER_STAGE.get(finishedStage));
         // 返工中的牙位重新通过质检后，自动关闭未完成的返工单
@@ -258,6 +267,8 @@ public class ProductionService {
                 rework.setCompletedAt(LocalDateTime.now());
                 reworkRepo.save(rework);
             }
+            // 色号争议重做件重新通过质检：返工记录同步质检，争议单推进
+            shadeDisputeService.onRemakeQcPassed(item, operator, record);
         }
     }
 

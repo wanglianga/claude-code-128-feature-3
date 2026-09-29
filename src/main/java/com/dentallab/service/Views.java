@@ -2,7 +2,9 @@ package com.dentallab.service;
 
 import com.dentallab.model.*;
 
+import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /** 实体 → 响应 Map 的统一转换，避免暴露 JPA 懒加载代理。 */
@@ -166,6 +168,68 @@ public final class Views {
         m.put("createdAt", r.getCreatedAt());
         m.put("completedAt", r.getCompletedAt());
         return m;
+    }
+
+    public static Map<String, Object> shadeDispute(ShadeDispute d) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", d.getId());
+        m.put("orderId", d.getOrder().getId());
+        m.put("orderNo", d.getOrder().getOrderNo());
+        m.put("toothItemId", d.getToothItem().getId());
+        m.put("toothPosition", d.getToothItem().getToothPosition());
+        m.put("patientClaim", d.getPatientClaim());
+        m.put("claimedShade", d.getClaimedShade());
+        m.put("shadePhotos", splitPhotos(d.getShadePhotos()));
+        m.put("doctorConfirmRecord", d.getDoctorConfirmRecord());
+        m.put("materialBatchRecord", d.getMaterialBatchRecord());
+        m.put("collectedBy", d.getCollectedBy() == null ? null : d.getCollectedBy().getDisplayName());
+        m.put("collectedAt", d.getCollectedAt());
+        m.put("naturalLightPhotos", splitPhotos(d.getNaturalLightPhotos()));
+        m.put("reshootNote", d.getReshootNote());
+        m.put("reshotBy", d.getReshotBy() == null ? null : d.getReshotBy().getDisplayName());
+        m.put("reshotAt", d.getReshotAt());
+        m.put("status", d.getStatus().name());
+        m.put("statusLabel", d.getStatus().getLabel());
+        m.put("targetShade", d.getTargetShade());
+        m.put("originalCondition", d.getOriginalCondition());
+        m.put("originalDisposition", d.getOriginalDisposition() == null ? null : d.getOriginalDisposition().name());
+        m.put("originalDispositionLabel",
+                d.getOriginalDisposition() == null ? null : d.getOriginalDisposition().getLabel());
+        m.put("costResponsibility", d.getCostResponsibility() == null ? null : d.getCostResponsibility().name());
+        m.put("costResponsibilityLabel",
+                d.getCostResponsibility() == null ? null : d.getCostResponsibility().getLabel());
+        m.put("remakeCost", d.getRemakeCost());
+        m.put("clinicShare", d.getClinicShare());
+        m.put("labShare", d.getLabShare());
+        if (d.getNewMaterialBatch() != null) {
+            m.put("newMaterialBatchId", d.getNewMaterialBatch().getId());
+            m.put("newMaterialBatchNo", d.getNewMaterialBatch().getBatchNo());
+            m.put("newMaterialName", d.getNewMaterialBatch().getMaterial().getName());
+        }
+        m.put("reworkId", d.getRework() == null ? null : d.getRework().getId());
+        m.put("decidedBy", d.getDecidedBy() == null ? null : d.getDecidedBy().getDisplayName());
+        m.put("decidedAt", d.getDecidedAt());
+        m.put("remakeQcNote", d.getRemakeQcNote());
+        m.put("remakeQcBy", d.getRemakeQcBy() == null ? null : d.getRemakeQcBy().getDisplayName());
+        m.put("remakeQcAt", d.getRemakeQcAt());
+        m.put("remakeTryInId", d.getRemakeTryIn() == null ? null : d.getRemakeTryIn().getId());
+        m.put("doctorReviewNote", d.getDoctorReviewNote());
+        m.put("doctorReviewedBy", d.getDoctorReviewedBy() == null ? null : d.getDoctorReviewedBy().getDisplayName());
+        m.put("doctorReviewedAt", d.getDoctorReviewedAt());
+        m.put("qcConclusion", d.getQcConclusion() == null ? null : d.getQcConclusion().name());
+        m.put("qcConclusionLabel", d.getQcConclusion() == null ? null : d.getQcConclusion().getLabel());
+        m.put("qcConclusionNote", d.getQcConclusionNote());
+        m.put("qcReviewedBy", d.getQcReviewedBy() == null ? null : d.getQcReviewedBy().getDisplayName());
+        m.put("archivedAt", d.getArchivedAt());
+        m.put("createdAt", d.getCreatedAt());
+        return m;
+    }
+
+    private static List<String> splitPhotos(String photos) {
+        if (photos == null || photos.isBlank()) {
+            return List.of();
+        }
+        return Arrays.stream(photos.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList();
     }
 
     public static Map<String, Object> material(Material mat, java.math.BigDecimal remaining) {

@@ -51,6 +51,7 @@ public class DataSeeder implements CommandLineRunner {
         account("tech1", "tech123", "张技工", Role.TECHNICIAN, null);
         account("tech2", "tech123", "李技工", Role.TECHNICIAN, null);
         account("qc1", "qc123", "周质检", Role.QC_INSPECTOR, null);
+        account("qcmgr1", "qcmgr123", "蒋质管", Role.QC_MANAGER, null);
         account("courier1", "courier123", "吴配送", Role.DELIVERY_COURIER, null);
         account("service1", "service123", "郑客服", Role.CUSTOMER_SERVICE, null);
         account("finance1", "finance123", "冯财务", Role.FINANCE, null);

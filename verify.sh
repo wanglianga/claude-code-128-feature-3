@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 全流程验证脚本：下单→接单→八道工序→发货→签收→试戴→返工→重做→结算→月结
+# 全流程验证脚本：下单→接单→八道工序→发货→签收→试戴→返工→重做→结算→月结→色号争议处理
 # 前提：服务已启动（默认 http://localhost:8080）
 set -euo pipefail
 
@@ -37,11 +37,12 @@ RECEIVER=$(login receiver lab123)
 TECH1=$(login tech1 tech123)
 TECH2=$(login tech2 tech123)
 QC=$(login qc1 qc123)
+QCMGR=$(login qcmgr1 qcmgr123)
 CADMIN=$(login clinicadmin1 admin123)
 LADMIN=$(login labadmin lab123)
 SERVICE=$(login service1 service123)
 FINANCE=$(login finance1 finance123)
-[ -n "$DOCTOR" ] && [ "$DOCTOR" != "null" ] && ok "9 个角色全部登录成功" || bad "登录失败"
+[ -n "$DOCTOR" ] && [ "$DOCTOR" != "null" ] && ok "10 个角色全部登录成功" || bad "登录失败"
 check "错误密码被拒绝" "$(req POST /api/auth/login '' '{"username":"doctor1","password":"x"}' | jq -r '.success')" "false"
 check "无令牌访问被拒绝" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/orders")" "401"
 
@@ -166,6 +167,98 @@ SETTLE2=$(req POST "/api/orders/$OID2/settlement" "$FINANCE" '')
 checkMoney "加急费(300×0.3)" "$(echo "$SETTLE2" | jq -r '.data.rushFee')" "90"
 checkMoney "延误扣罚(300×0.05)" "$(echo "$SETTLE2" | jq -r '.data.deliveryPenalty')" "15"
 checkMoney "加急单应付(300+90-15)" "$(echo "$SETTLE2" | jq -r '.data.totalAmount')" "375"
+
+say "11. 色号争议处理：取证→自然光复拍→重做（原件去向/费用/新材料批次）→试戴回牙位→医生关闭→质管归档"
+ORDER4=$(req POST /api/orders "$DOCTOR" '{"patientCode":"PAT-VERIFY-004","prosthesisType":"PFM_CROWN","impressionMethod":"TRADITIONAL","toothPositions":["21"],"shade":"VITA A1","expectedTryInDate":"2026-10-08","difficulty":1}')
+OID4=$(echo "$ORDER4" | jq -r '.data.id')
+ITEM4=$(echo "$ORDER4" | jq -r '.data.toothItems[0].id')
+PORC_MAT=$(req GET /api/inventory/materials "$LADMIN" | jq -r '.data[] | select(.code=="PORC") | .id')
+PORC_OLD=$(req GET /api/inventory/materials "$LADMIN" | jq -r '.data[] | select(.code=="PORC") | .batches[0].id')
+PORC_NEW=$(req POST "/api/inventory/materials/$PORC_MAT/batches" "$LADMIN" '{"batchNo":"B20260920","qty":80}' | jq -r '.data.id')
+
+req POST "/api/orders/$OID4/accept" "$RECEIVER" > /dev/null
+stage4() { req POST "/api/orders/$OID4/items/$ITEM4/stages" "$2" "{\"stage\":\"$1\",\"estimatedFinishAt\":\"2026-12-31T23:59:00\",\"finish\":true$3}" > /dev/null; }
+stage4 MODEL_RECEIVING "$RECEIVER" ''
+stage4 SCAN_DESIGN "$TECH1" ',"photos":["shade_photo_21.jpg"]'
+req POST "/api/orders/$OID4/items/$ITEM4/confirm" "$DOCTOR" '{"note":"比色板VITA A1，医生确认色号"}' > /dev/null
+stage4 TEETH_ARRANGEMENT "$TECH1" ''
+stage4 SINTERING "$TECH2" ",\"materialBatchId\":$PORC_OLD,\"materialQty\":\"5\""
+stage4 POLISHING "$TECH1" ''
+stage4 QC "$QC" ',"photos":["qc_21.jpg"]'
+stage4 DELIVERY "$RECEIVER" ''
+SHIP4=$(req POST "/api/orders/$OID4/shipments" "$RECEIVER" '')
+SHIP4_ID=$(echo "$SHIP4" | jq -r '.data.id')
+req POST "/api/shipments/$SHIP4_ID/sign" "$CADMIN" '{"signResult":"GOOD","signedByName":"陈前台"}' > /dev/null
+req POST "/api/orders/$OID4/try-ins" "$DOCTOR" "{\"toothItemId\":$ITEM4,\"result\":\"FIT\",\"experienceScore\":4}" > /dev/null
+
+# 发起争议 → 自动登记色号争议异常，医生端订单详情同步可见
+DISPUTE=$(req POST "/api/orders/$OID4/shade-disputes" "$DOCTOR" "{\"toothItemId\":$ITEM4,\"patientClaim\":\"患者反馈21比邻牙偏黄\",\"claimedShade\":\"VITA A2\"}")
+DISP_ID=$(echo "$DISPUTE" | jq -r '.data.id')
+check "争议单创建状态" "$(echo "$DISPUTE" | jq -r '.data.status')" "OPEN"
+check "自动登记色号争议异常" "$(req GET "/api/orders/$OID4/exceptions" "$DOCTOR" | jq -r '[.data[] | select(.type=="SHADE_DISPUTE")] | length')" "1"
+check "订单详情同步争议单" "$(req GET "/api/orders/$OID4" "$DOCTOR" | jq -r '.data.shadeDisputes | length')" "1"
+check "重复发起被拒" "$(req POST "/api/orders/$OID4/shade-disputes" "$DOCTOR" "{\"toothItemId\":$ITEM4,\"patientClaim\":\"重复\"}" | jq -r '.success')" "false"
+
+# 调取取色照片/医生确认记录/材料批次
+EV=$(req POST "/api/shade-disputes/$DISP_ID/collect-evidence" "$SERVICE" '{"shadePhotos":["shade_guide_21.jpg"]}')
+check "取证后状态" "$(echo "$EV" | jq -r '.data.status')" "EVIDENCE_COLLECTED"
+check "取证含档案取色照片" "$(echo "$EV" | jq -r '.data.shadePhotos | index("shade_photo_21.jpg") != null')" "true"
+check "取证含医生确认记录" "$(echo "$EV" | jq -r '.data.doctorConfirmRecord | contains("比色板VITA A1")')" "true"
+check "取证含材料批次记录" "$(echo "$EV" | jq -r '.data.materialBatchRecord | contains("B20260905")')" "true"
+check "医生无权取证" "$(req POST "/api/shade-disputes/$DISP_ID/collect-evidence" "$DOCTOR" '{}' | jq -r '.success')" "false"
+
+# 自然光复拍
+RS=$(req POST "/api/shade-disputes/$DISP_ID/reshoot" "$DOCTOR" '{"photos":["natural_21_1.jpg","natural_21_2.jpg"],"note":"自然光下半阶偏差"}')
+check "复拍后状态" "$(echo "$RS" | jq -r '.data.status')" "RESHOT"
+check "复拍照片数" "$(echo "$RS" | jq -r '.data.naturalLightPhotos | length')" "2"
+
+# 判定重新制作：原件状态与费用单独记录，保留原义齿去向与新材料批次
+DC=$(req POST "/api/shade-disputes/$DISP_ID/decide" "$LADMIN" "{\"remake\":true,\"targetShade\":\"VITA A2\",\"originalCondition\":\"原冠完好仅偏黄\",\"originalDisposition\":\"RETURNED_TO_LAB\",\"costResponsibility\":\"LAB\",\"remakeCost\":150,\"newMaterialBatchId\":$PORC_NEW}")
+check "重做判定状态" "$(echo "$DC" | jq -r '.data.status')" "REWORK_DECIDED"
+check "原义齿去向记录" "$(echo "$DC" | jq -r '.data.originalDisposition')" "RETURNED_TO_LAB"
+check "费用承担方记录" "$(echo "$DC" | jq -r '.data.costResponsibility')" "LAB"
+checkMoney "重做费用单独记录" "$(echo "$DC" | jq -r '.data.remakeCost')" "150"
+check "新材料批次保留" "$(echo "$DC" | jq -r '.data.newMaterialBatchNo')" "B20260920"
+DISP_REWORK=$(echo "$DC" | jq -r '.data.reworkId')
+check "同步创建返工单" "$(req GET "/api/orders/$OID4/reworks" "$DOCTOR" | jq -r --arg id "$DISP_REWORK" '[.data[] | select(.id==($id|tonumber))] | length')" "1"
+
+# 重做全工序（烧结使用新材料批次）
+stage4 MODEL_RECEIVING "$RECEIVER" ''
+stage4 SCAN_DESIGN "$TECH1" ',"photos":["shade_photo_21_v2.jpg"]'
+req POST "/api/orders/$OID4/items/$ITEM4/confirm" "$DOCTOR" '{"note":"确认按A2重做"}' > /dev/null
+stage4 TEETH_ARRANGEMENT "$TECH1" ''
+stage4 SINTERING "$TECH2" ",\"materialBatchId\":$PORC_NEW,\"materialQty\":\"5\""
+stage4 POLISHING "$TECH1" ''
+stage4 QC "$QC" ',"note":"重做件颜色与邻牙一致","photos":["qc_21_v2.jpg"]'
+check "返工记录同步质检后争议单推进" "$(req GET "/api/shade-disputes/$DISP_ID" "$QC" | jq -r '.data.status')" "REMAKE_QC_PASSED"
+check "返工单质检后自动关闭" "$(req GET "/api/orders/$OID4/reworks" "$DOCTOR" | jq -r --arg id "$DISP_REWORK" '.data[] | select(.id==($id|tonumber)) | .status')" "COMPLETED"
+stage4 DELIVERY "$RECEIVER" ''
+SHIP5=$(req POST "/api/orders/$OID4/shipments" "$RECEIVER" "{\"itemIds\":[$ITEM4]}")
+SHIP5_ID=$(echo "$SHIP5" | jq -r '.data.id')
+req POST "/api/shipments/$SHIP5_ID/sign" "$CADMIN" '{"signResult":"GOOD","signedByName":"陈前台"}' > /dev/null
+TRY5=$(req POST "/api/orders/$OID4/try-ins" "$DOCTOR" "{\"toothItemId\":$ITEM4,\"result\":\"FIT\",\"feedback\":\"新色号与邻牙一致\",\"experienceScore\":5}")
+TRY5_ID=$(echo "$TRY5" | jq -r '.data.id')
+check "试戴反馈回到同一牙位档案" "$(req GET "/api/shade-disputes/$DISP_ID" "$DOCTOR" | jq -r '.data.remakeTryInId')" "$TRY5_ID"
+check "试戴后争议单状态" "$(req GET "/api/shade-disputes/$DISP_ID" "$DOCTOR" | jq -r '.data.status')" "REMAKE_FITTED"
+check "牙位看板含色号争议" "$(req GET "/api/orders/$OID4/tooth-board" "$DOCTOR" | jq -r '.data.teeth[0].shadeDisputes | length')" "1"
+
+# 医生复核关闭 → 质检员无权归档 → 质检主管复核归档
+req POST "/api/shade-disputes/$DISP_ID/doctor-review" "$DOCTOR" '{"note":"医生复核颜色一致，患者确认，关闭"}' > /dev/null
+check "医生复核后状态" "$(req GET "/api/shade-disputes/$DISP_ID" "$DOCTOR" | jq -r '.data.status')" "DOCTOR_REVIEWED"
+check "质检员无权归档" "$(req POST "/api/shade-disputes/$DISP_ID/qc-archive" "$QC" '{"qcConclusion":"COLOR_MATCHED"}' | jq -r '.success')" "false"
+AR=$(req POST "/api/shade-disputes/$DISP_ID/qc-archive" "$QCMGR" '{"qcConclusion":"COLOR_DEVIATION_CONFIRMED","note":"原件半阶色差，重做合格"}')
+check "质管归档状态" "$(echo "$AR" | jq -r '.data.status')" "ARCHIVED"
+check "质检结论" "$(echo "$AR" | jq -r '.data.qcConclusion')" "COLOR_DEVIATION_CONFIRMED"
+check "归档后色号异常同步关闭" "$(req GET "/api/orders/$OID4/exceptions" "$DOCTOR" | jq -r '[.data[] | select(.type=="SHADE_DISPUTE")] | all(.status=="RESOLVED")')" "true"
+check "归档后退出工作台" "$(req GET /api/shade-disputes/open "$QCMGR" | jq -r --arg id "$DISP_ID" '[.data[] | select(.id==($id|tonumber))] | length')" "0"
+DOCTOR2=$(login doctor2 doctor123)
+check "他诊所医生工作台不可见" "$(req GET /api/shade-disputes/open "$DOCTOR2" | jq -r --arg id "$DISP_ID" '[.data[] | select(.id==($id|tonumber))] | length')" "0"
+
+# 结算联动：技工所承担重做费150扣减（300-150=150）
+SETTLE4=$(req POST "/api/orders/$OID4/settlement" "$FINANCE" '')
+checkMoney "色号争议单基础费" "$(echo "$SETTLE4" | jq -r '.data.baseAmount')" "300"
+checkMoney "色号争议技工所承担扣减" "$(echo "$SETTLE4" | jq -r '.data.reworkLabDeduction')" "150"
+checkMoney "色号争议单应付(300-150)" "$(echo "$SETTLE4" | jq -r '.data.totalAmount')" "150"
 
 echo ""
 echo "==============================================="

@@ -19,7 +19,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * 端到端流程测试（真实 PostgreSQL，dentallab_test 库）：
- * 下单→接单→八道工序→发货→签收→试戴→返工→责任判定→重做→再签收→结算→月结复核。
+ * 下单→接单→八道工序→发货→签收→试戴→返工→责任判定→重做→再签收→结算→月结复核；
+ * 加急+延误场景；色号争议处理（重新制作 / 不重新制作两条分支）。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -47,6 +48,7 @@ class DentalLabFlowTest {
     private static String tech1Token;
     private static String tech2Token;
     private static String qcToken;
+    private static String qcMgrToken;
     private static String clinicAdminToken;
     private static String labAdminToken;
     private static String serviceToken;
@@ -69,6 +71,7 @@ class DentalLabFlowTest {
         tech1Token = login("tech1", "tech123");
         tech2Token = login("tech2", "tech123");
         qcToken = login("qc1", "qc123");
+        qcMgrToken = login("qcmgr1", "qcmgr123");
         clinicAdminToken = login("clinicadmin1", "admin123");
         labAdminToken = login("labadmin", "lab123");
         serviceToken = login("service1", "service123");
@@ -419,6 +422,276 @@ class DentalLabFlowTest {
         assertMoney("90.00", s.get("rushFee"));
         assertMoney("15.00", s.get("deliveryPenalty"));
         assertMoney("375.00", s.get("totalAmount"));
+    }
+
+    // ---------- 第三场景：色号争议处理（重新制作） ----------
+
+    @Test
+    @Order(10)
+    void shadeDisputeWithRemakeFlow() {
+        // 诊所下单（烤瓷冠 21，色号 VITA A1）
+        Map<String, Object> body = new HashMap<>();
+        body.put("patientCode", "PAT-2026-0003");
+        body.put("prosthesisType", "PFM_CROWN");
+        body.put("impressionMethod", "TRADITIONAL");
+        body.put("toothPositions", List.of("21"));
+        body.put("shade", "VITA A1");
+        body.put("expectedTryInDate", LocalDate.now().plusDays(3).toString());
+        body.put("difficulty", 1);
+        Map<String, Object> order = data(post(doctorToken, "/api/orders", body));
+        Long oid = toLong(order.get("id"));
+        Long item = toLong(list(order, "toothItems").get(0).get("id"));
+
+        // 饰瓷瓷粉批次（原材料批次）
+        Map<String, Object> porc = list(data(get(labAdminToken, "/api/inventory/materials")), "$data").stream()
+                .filter(m -> "PORC".equals(m.get("code"))).findFirst().orElseThrow();
+        Long porcMaterialId = toLong(porc.get("id"));
+        Long oldPorcBatch = toLong(list(porc, "batches").get(0).get("id"));
+        // 新材料批次入库（重新制作保留新材料批次）
+        Map<String, Object> newBatch = data(post(labAdminToken,
+                "/api/inventory/materials/" + porcMaterialId + "/batches",
+                Map.of("batchNo", "B20260910", "qty", 100)));
+        Long newPorcBatch = toLong(newBatch.get("id"));
+
+        // 走完八道工序（扫描设计与质检环节留下取色/对比照片，烧结使用原饰瓷批次）
+        data(post(receiverToken, "/api/orders/" + oid + "/accept", null));
+        data(post(receiverToken, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("MODEL_RECEIVING", "模型接收", null, null, null)));
+        data(post(tech1Token, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("SCAN_DESIGN", "比色取色照片已归档", null, null, List.of("shade_photo_21.jpg"))));
+        data(post(doctorToken, "/api/orders/" + oid + "/items/" + item + "/confirm",
+                Map.of("note", "比色板VITA A1，医生确认色号")));
+        data(post(tech1Token, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("TEETH_ARRANGEMENT", "排牙完成", null, null, null)));
+        data(post(tech2Token, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("SINTERING", "烧结完成", oldPorcBatch, "5", null)));
+        data(post(tech1Token, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("POLISHING", "抛光完成", null, null, null)));
+        data(post(qcToken, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("QC", "质检合格", null, null, List.of("qc_21.jpg"))));
+        data(post(receiverToken, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("DELIVERY", "打包待发", null, null, null)));
+
+        // 发货签收，首次试戴密合
+        Long shipId = toLong(data(post(receiverToken, "/api/orders/" + oid + "/shipments", null)).get("id"));
+        data(post(clinicAdminToken, "/api/shipments/" + shipId + "/sign",
+                Map.of("signResult", "GOOD", "signedByName", "陈前台")));
+        data(post(doctorToken, "/api/orders/" + oid + "/try-ins",
+                Map.of("toothItemId", item, "result", "FIT", "experienceScore", 4)));
+
+        // 1) 患者事后认为颜色与邻牙不一致 → 医生发起色号争议
+        Map<String, Object> opened = data(post(doctorToken, "/api/orders/" + oid + "/shade-disputes",
+                Map.of("toothItemId", item, "patientClaim", "患者戴牙后反馈比邻牙偏黄，要求核对",
+                        "claimedShade", "VITA A2")));
+        Long disputeId = toLong(opened.get("id"));
+        assertEquals("OPEN", opened.get("status"));
+        assertEquals("21", opened.get("toothPosition"));
+        // 自动登记色号争议异常，医生端订单详情同步可见
+        Map<String, Object> detail = data(get(doctorToken, "/api/orders/" + oid));
+        assertTrue(list(detail, "exceptions").stream().anyMatch(e -> "SHADE_DISPUTE".equals(e.get("type"))));
+        assertEquals(1, list(detail, "shadeDisputes").size());
+        // 未完成制作的牙位不能发起争议（另建订单快速校验）→ 已由 currentStage 校验，此处校验重复发起被拒
+        ResponseEntity<Map> duplicate = postRaw(doctorToken, "/api/orders/" + oid + "/shade-disputes",
+                Map.of("toothItemId", item, "patientClaim", "重复发起"));
+        assertEquals(HttpStatus.BAD_REQUEST, duplicate.getStatusCode());
+
+        // 2) 服务调取取色照片、医生确认记录、材料批次
+        Map<String, Object> evidence = data(post(serviceToken,
+                "/api/shade-disputes/" + disputeId + "/collect-evidence",
+                Map.of("shadePhotos", List.of("shade_guide_21.jpg"))));
+        assertEquals("EVIDENCE_COLLECTED", evidence.get("status"));
+        List<?> evidencePhotos = list(evidence, "shadePhotos");
+        assertTrue(evidencePhotos.contains("shade_photo_21.jpg"));
+        assertTrue(evidencePhotos.contains("qc_21.jpg"));
+        assertTrue(evidencePhotos.contains("shade_guide_21.jpg"));
+        assertTrue(String.valueOf(evidence.get("doctorConfirmRecord")).contains("比色板VITA A1"));
+        assertTrue(String.valueOf(evidence.get("materialBatchRecord")).contains("B20260905"));
+        // 医生端不能自行取证
+        assertEquals(HttpStatus.FORBIDDEN, postRaw(doctorToken,
+                "/api/shade-disputes/" + disputeId + "/collect-evidence", Map.of()).getStatusCode());
+
+        // 3) 自然光复拍（医生在自然光下复拍义齿与邻牙对比）
+        Map<String, Object> reshot = data(post(doctorToken,
+                "/api/shade-disputes/" + disputeId + "/reshoot",
+                Map.of("photos", List.of("natural_21_1.jpg", "natural_21_2.jpg"),
+                        "note", "上午10点窗边自然光，21较邻牙偏黄半个色阶")));
+        assertEquals("RESHOT", reshot.get("status"));
+        assertEquals(2, list(reshot, "naturalLightPhotos").size());
+
+        // 4) 技工所管理员判定重新制作：原件状态、费用承担单独记录，保留原义齿去向与新材料批次
+        Map<String, Object> decided = data(post(labAdminToken,
+                "/api/shade-disputes/" + disputeId + "/decide", Map.of(
+                        "remake", true,
+                        "targetShade", "VITA A2",
+                        "originalCondition", "原冠完好无崩瓷，仅颜色偏黄",
+                        "originalDisposition", "RETURNED_TO_LAB",
+                        "costResponsibility", "LAB",
+                        "remakeCost", 150,
+                        "newMaterialBatchId", newPorcBatch)));
+        assertEquals("REWORK_DECIDED", decided.get("status"));
+        assertEquals("RETURNED_TO_LAB", decided.get("originalDisposition"));
+        assertMoney("150.00", decided.get("remakeCost"));
+        assertMoney("150.00", decided.get("labShare"));
+        assertMoney("0.00", decided.get("clinicShare"));
+        assertEquals("B20260910", decided.get("newMaterialBatchNo"));
+        Long shadeReworkId = toLong(decided.get("reworkId"));
+        assertNotNull(shadeReworkId);
+        // 牙位打回生产线
+        detail = data(get(doctorToken, "/api/orders/" + oid));
+        assertEquals("IN_PRODUCTION", detail.get("status"));
+
+        // 5) 重新制作：重做烧结使用新材料批次
+        data(post(receiverToken, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("MODEL_RECEIVING", "重做模型接收", null, null, null)));
+        data(post(tech1Token, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("SCAN_DESIGN", "按A2重新比色设计", null, null, List.of("shade_photo_21_v2.jpg"))));
+        data(post(doctorToken, "/api/orders/" + oid + "/items/" + item + "/confirm",
+                Map.of("note", "确认按VITA A2重做")));
+        data(post(tech1Token, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("TEETH_ARRANGEMENT", "重做排牙", null, null, null)));
+        data(post(tech2Token, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("SINTERING", "新材料批次重做烧结", newPorcBatch, "5", null)));
+        data(post(tech1Token, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("POLISHING", "重做抛光", null, null, null)));
+        data(post(qcToken, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("QC", "重做件质检颜色与邻牙一致", null, null, List.of("qc_21_v2.jpg"))));
+
+        // 返工记录同步质检：重做件通过质检 → 返工单自动关闭、争议单推进
+        Map<String, Object> afterQc = data(get(qcToken, "/api/shade-disputes/" + disputeId));
+        assertEquals("REMAKE_QC_PASSED", afterQc.get("status"));
+        assertEquals("周质检", afterQc.get("remakeQcBy"));
+        Map<String, Object> rework = list(data(get(doctorToken, "/api/orders/" + oid + "/reworks")), "$data")
+                .stream().filter(r -> shadeReworkId.equals(toLong(r.get("id")))).findFirst().orElseThrow();
+        assertEquals("COMPLETED", rework.get("status"));
+        assertEquals("LAB", rework.get("responsibility"));
+        assertTrue(String.valueOf(rework.get("reason")).contains("色号争议"));
+
+        // 6) 重做件配送、患者试戴反馈回到同一牙位档案
+        data(post(receiverToken, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("DELIVERY", "重做件打包", null, null, null)));
+        Long ship2Id = toLong(data(post(receiverToken, "/api/orders/" + oid + "/shipments",
+                Map.of("itemIds", List.of(item)))).get("id"));
+        data(post(clinicAdminToken, "/api/shipments/" + ship2Id + "/sign",
+                Map.of("signResult", "GOOD", "signedByName", "陈前台")));
+        Map<String, Object> remakeFit = data(post(doctorToken, "/api/orders/" + oid + "/try-ins",
+                Map.of("toothItemId", item, "result", "FIT",
+                        "feedback", "新色号与邻牙一致，患者满意", "experienceScore", 5)));
+        Long remakeTryInId = toLong(remakeFit.get("id"));
+
+        Map<String, Object> afterFit = data(get(doctorToken, "/api/shade-disputes/" + disputeId));
+        assertEquals("REMAKE_FITTED", afterFit.get("status"));
+        assertEquals(remakeTryInId, toLong(afterFit.get("remakeTryInId")));
+        // 试戴反馈挂在同一牙位档案下（牙位看板可见全部工序与试戴）
+        Map<String, Object> board = data(get(doctorToken, "/api/orders/" + oid + "/tooth-board"));
+        Map<String, Object> tooth21 = list(board, "teeth").stream()
+                .filter(t -> "21".equals(t.get("toothPosition"))).findFirst().orElseThrow();
+        assertEquals(1, list(tooth21, "shadeDisputes").size());
+        assertTrue(list(tooth21, "stages").size() >= 16);
+
+        // 7) 医生复核后关闭
+        Map<String, Object> reviewed = data(post(doctorToken,
+                "/api/shade-disputes/" + disputeId + "/doctor-review",
+                Map.of("note", "医生复核：重做件颜色与邻牙一致，患者确认，关闭争议")));
+        assertEquals("DOCTOR_REVIEWED", reviewed.get("status"));
+        // 质检主管复核前，质检员无权归档
+        assertEquals(HttpStatus.FORBIDDEN, postRaw(qcToken,
+                "/api/shade-disputes/" + disputeId + "/qc-archive",
+                Map.of("qcConclusion", "COLOR_MATCHED")).getStatusCode());
+
+        // 8) 质检主管复核，质检结论归档，色号争议异常同步关闭
+        Map<String, Object> archived = data(post(qcMgrToken,
+                "/api/shade-disputes/" + disputeId + "/qc-archive",
+                Map.of("qcConclusion", "COLOR_DEVIATION_CONFIRMED",
+                        "note", "原义齿确有半阶色差，重做件合格，费用技工所承担")));
+        assertEquals("ARCHIVED", archived.get("status"));
+        assertEquals("COLOR_DEVIATION_CONFIRMED", archived.get("qcConclusion"));
+        assertEquals("蒋质管", archived.get("qcReviewedBy"));
+        assertNotNull(archived.get("archivedAt"));
+        assertTrue(list(data(get(doctorToken, "/api/orders/" + oid)), "exceptions").stream()
+                .filter(e -> "SHADE_DISPUTE".equals(e.get("type")))
+                .allMatch(e -> "RESOLVED".equals(e.get("status"))));
+        // 已归档后工作台不再出现
+        assertTrue(list(data(get(qcMgrToken, "/api/shade-disputes/open")), "$data").stream()
+                .noneMatch(d -> disputeId.equals(toLong(d.get("id")))));
+
+        // 9) 结算联动：技工所承担重做费 150 单独扣减（300 − 150 = 150）
+        detail = data(get(doctorToken, "/api/orders/" + oid));
+        assertEquals("COMPLETED", detail.get("status"));
+        Map<String, Object> st = data(post(financeToken, "/api/orders/" + oid + "/settlement", null));
+        assertMoney("300.00", st.get("baseAmount"));
+        assertMoney("150.00", st.get("reworkLabDeduction"));
+        assertMoney("150.00", st.get("totalAmount"));
+    }
+
+    // ---------- 第四场景：色号争议处理（不重新制作，沟通后患者接受） ----------
+
+    @Test
+    @Order(11)
+    void shadeDisputeRejectedBranch() {
+        Map<String, Object> body = new HashMap<>();
+        body.put("patientCode", "PAT-2026-0004");
+        body.put("prosthesisType", "ALL_CERAMIC_CROWN");
+        body.put("impressionMethod", "DIGITAL_SCAN");
+        body.put("toothPositions", List.of("23"));
+        body.put("shade", "VITA A3");
+        body.put("expectedTryInDate", LocalDate.now().plusDays(4).toString());
+        body.put("difficulty", 2);
+        Map<String, Object> order = data(post(doctorToken, "/api/orders", body));
+        Long oid = toLong(order.get("id"));
+        Long item = toLong(list(order, "toothItems").get(0).get("id"));
+
+        data(post(receiverToken, "/api/orders/" + oid + "/accept", null));
+        data(post(receiverToken, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("MODEL_RECEIVING", null, null, null, null)));
+        data(post(tech1Token, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("SCAN_DESIGN", null, null, null, List.of("shade_23.jpg"))));
+        data(post(doctorToken, "/api/orders/" + oid + "/items/" + item + "/confirm",
+                Map.of("note", "色号A3确认")));
+        data(post(tech1Token, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("TEETH_ARRANGEMENT", null, null, null, null)));
+        data(post(tech2Token, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("SINTERING", null, zirconiaBatchId, "1", null)));
+        data(post(tech1Token, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("POLISHING", null, null, null, null)));
+        data(post(qcToken, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("QC", null, null, null, List.of("qc_23.jpg"))));
+        data(post(receiverToken, "/api/orders/" + oid + "/items/" + item + "/stages",
+                stageBody("DELIVERY", null, null, null, null)));
+
+        Map<String, Object> dispute = data(post(doctorToken, "/api/orders/" + oid + "/shade-disputes",
+                Map.of("toothItemId", item, "patientClaim", "患者觉得灯光下颜色偏白")));
+        Long disputeId = toLong(dispute.get("id"));
+        data(post(serviceToken, "/api/shade-disputes/" + disputeId + "/collect-evidence", Map.of()));
+        data(post(doctorToken, "/api/shade-disputes/" + disputeId + "/reshoot",
+                Map.of("photos", List.of("natural_23.jpg"), "note", "自然光下与邻牙无色差")));
+
+        // 判定不重新制作
+        Map<String, Object> rejected = data(post(labAdminToken,
+                "/api/shade-disputes/" + disputeId + "/decide",
+                Map.of("remake", false, "decisionNote", "自然光复核颜色一致，为诊室灯光色温导致，患者接受")));
+        assertEquals("REJECTED", rejected.get("status"));
+        assertNull(rejected.get("reworkId"));
+
+        // 工作台：医生端可见本诊所争议；他诊所医生不可见
+        String doctor2Token = login("doctor2", "doctor123");
+        assertTrue(list(data(get(doctorToken, "/api/shade-disputes/open")), "$data").stream()
+                .anyMatch(d -> disputeId.equals(toLong(d.get("id")))));
+        assertTrue(list(data(get(doctor2Token, "/api/shade-disputes/open")), "$data").stream()
+                .noneMatch(d -> disputeId.equals(toLong(d.get("id")))));
+        // 他诊所医生不能复核
+        assertEquals(HttpStatus.FORBIDDEN, postRaw(doctor2Token,
+                "/api/shade-disputes/" + disputeId + "/doctor-review", Map.of()).getStatusCode());
+
+        // 医生复核关闭 → 质检主管复核归档
+        data(post(doctorToken, "/api/shade-disputes/" + disputeId + "/doctor-review", Map.of()));
+        Map<String, Object> archived = data(post(qcMgrToken,
+                "/api/shade-disputes/" + disputeId + "/qc-archive",
+                Map.of("qcConclusion", "PATIENT_ACCEPTED", "note", "沟通后患者接受，结论归档")));
+        assertEquals("ARCHIVED", archived.get("status"));
+        assertEquals("PATIENT_ACCEPTED", archived.get("qcConclusion"));
+        assertTrue(list(data(get(doctorToken, "/api/orders/" + oid)), "exceptions").stream()
+                .filter(e -> "SHADE_DISPUTE".equals(e.get("type")))
+                .allMatch(e -> "RESOLVED".equals(e.get("status"))));
     }
 
     // ---------- 工具方法 ----------

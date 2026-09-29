@@ -8,6 +8,7 @@ public enum Role {
     LAB_ADMIN("技工所管理员"),
     TECHNICIAN("技工"),
     QC_INSPECTOR("质检员"),
+    QC_MANAGER("质检主管"),
     DELIVERY_COURIER("配送员"),
     CUSTOMER_SERVICE("客服"),
     FINANCE("财务");

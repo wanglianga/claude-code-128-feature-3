@@ -20,16 +20,19 @@ public class TryInService {
     private final ToothItemRepo itemRepo;
     private final OrderExceptionRepo exceptionRepo;
     private final ReworkRecordRepo reworkRepo;
+    private final ShadeDisputeService shadeDisputeService;
     private final AuthService authService;
 
     public TryInService(TryInRecordRepo tryInRepo, DentureOrderRepo orderRepo, ToothItemRepo itemRepo,
                         OrderExceptionRepo exceptionRepo, ReworkRecordRepo reworkRepo,
+                        ShadeDisputeService shadeDisputeService,
                         AuthService authService) {
         this.tryInRepo = tryInRepo;
         this.orderRepo = orderRepo;
         this.itemRepo = itemRepo;
         this.exceptionRepo = exceptionRepo;
         this.reworkRepo = reworkRepo;
+        this.shadeDisputeService = shadeDisputeService;
         this.authService = authService;
     }
 
@@ -74,6 +77,8 @@ public class TryInService {
                 t.setStatus(ToothItemStatus.TRY_IN_OK);
                 t.setUpdatedAt(LocalDateTime.now());
                 itemRepo.save(t);
+                // 色号争议重做件患者试戴反馈回到同一牙位档案
+                shadeDisputeService.onRemakeTryIn(t, record, TryInResult.FIT);
             }
         } else {
             for (ToothItem t : targets) {
@@ -81,6 +86,8 @@ public class TryInService {
                 t.setCurrentStage(null);
                 t.setUpdatedAt(LocalDateTime.now());
                 itemRepo.save(t);
+                // 色号争议重做件仍不密合/不满意：试戴反馈同样回到同一牙位档案
+                shadeDisputeService.onRemakeTryIn(t, record, TryInResult.MISFIT);
                 if (reworkRepo.findByToothItemIdAndStatus(t.getId(), ReworkStatus.OPEN).isEmpty()) {
                     ReworkRecord rework = new ReworkRecord();
                     rework.setOrder(order);
