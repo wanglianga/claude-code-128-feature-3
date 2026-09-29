@@ -22,12 +22,14 @@ public class OrderService {
     private final ShipmentRepo shipmentRepo;
     private final TryInRecordRepo tryInRepo;
     private final SettlementRepo settlementRepo;
+    private final ShadeDisputeRepo shadeDisputeRepo;
     private final AuthService authService;
 
     public OrderService(DentureOrderRepo orderRepo, ToothItemRepo itemRepo, ScanFileRepo scanFileRepo,
                         OrderExceptionRepo exceptionRepo, ReworkRecordRepo reworkRepo,
                         ShipmentRepo shipmentRepo, TryInRecordRepo tryInRepo,
-                        SettlementRepo settlementRepo, AuthService authService) {
+                        SettlementRepo settlementRepo, ShadeDisputeRepo shadeDisputeRepo,
+                        AuthService authService) {
         this.orderRepo = orderRepo;
         this.itemRepo = itemRepo;
         this.scanFileRepo = scanFileRepo;
@@ -36,6 +38,7 @@ public class OrderService {
         this.shipmentRepo = shipmentRepo;
         this.tryInRepo = tryInRepo;
         this.settlementRepo = settlementRepo;
+        this.shadeDisputeRepo = shadeDisputeRepo;
         this.authService = authService;
     }
 
@@ -154,6 +157,8 @@ public class OrderService {
                 .map(Views::exception).collect(Collectors.toList()));
         m.put("reworks", reworkRepo.findByOrderIdOrderByIdAsc(orderId).stream()
                 .map(Views::rework).collect(Collectors.toList()));
+        m.put("shadeDisputes", shadeDisputeRepo.findByOrderIdOrderByIdAsc(orderId).stream()
+                .map(Views::shadeDispute).collect(Collectors.toList()));
         m.put("shipments", shipmentRepo.findByOrderIdOrderByIdDesc(orderId).stream()
                 .map(Views::shipment).collect(Collectors.toList()));
         m.put("tryIns", tryInRepo.findByOrderIdOrderByIdAsc(orderId).stream()

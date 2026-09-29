@@ -167,6 +167,93 @@ checkMoney "加急费(300×0.3)" "$(echo "$SETTLE2" | jq -r '.data.rushFee')" "9
 checkMoney "延误扣罚(300×0.05)" "$(echo "$SETTLE2" | jq -r '.data.deliveryPenalty')" "15"
 checkMoney "加急单应付(300+90-15)" "$(echo "$SETTLE2" | jq -r '.data.totalAmount')" "375"
 
+say "11. 色号争议：发起→证据链→自然光复拍→判定重做→原件/费用/新材料批次→重做试戴→医生关闭→质检复核归档"
+ORDER3=$(req POST /api/orders "$DOCTOR" '{"patientCode":"PAT-VERIFY-003","prosthesisType":"PFM_CROWN","impressionMethod":"TRADITIONAL","toothPositions":["21"],"shade":"VITA A3","expectedTryInDate":"2026-10-08","difficulty":1}')
+OID3=$(echo "$ORDER3" | jq -r '.data.id')
+ITEM4=$(echo "$ORDER3" | jq -r '.data.toothItems[0].id')
+req POST "/api/orders/$OID3/accept" "$RECEIVER" > /dev/null
+stage3() { req POST "/api/orders/$OID3/items/$ITEM4/stages" "$2" "{\"stage\":\"$1\",\"finish\":true,\"estimatedFinishAt\":\"2026-12-31T23:59:00\"$3}" > /dev/null; }
+stage3 MODEL_RECEIVING "$RECEIVER" ''
+stage3 SCAN_DESIGN "$TECH1" ',"photos":["shade_design_21.jpg"]'
+req POST "/api/orders/$OID3/items/$ITEM4/confirm" "$DOCTOR" '{"note":"比色VITA A3，医生确认"}' > /dev/null
+stage3 TEETH_ARRANGEMENT "$TECH1" ''
+stage3 SINTERING "$TECH2" ",\"materialBatchId\":$ZIRC_BATCH,\"materialQty\":\"1\""
+stage3 POLISHING "$TECH1" ''
+stage3 QC "$QC" ',"photos":["shade_qc_21.jpg"]'
+stage3 DELIVERY "$RECEIVER" ''
+SHIP4=$(req POST "/api/orders/$OID3/shipments" "$RECEIVER" '')
+SHIP4_ID=$(echo "$SHIP4" | jq -r '.data.id')
+req POST "/api/shipments/$SHIP4_ID/sign" "$CADMIN" '{"signResult":"GOOD","signedByName":"陈前台"}' > /dev/null
+
+# 配送员无权发起争议
+check "配送员发起色号争议被拒" "$(req POST "/api/orders/$OID3/shade-disputes" "$(login courier1 courier123)" "{\"toothItemId\":$ITEM4,\"patientClaim\":\"颜色不一致\"}" | jq -r '.success')" "false"
+
+DISPUTE=$(req POST "/api/orders/$OID3/shade-disputes" "$DOCTOR" "{\"toothItemId\":$ITEM4,\"patientClaim\":\"患者反映比相邻天然牙偏黄\",\"observedShade\":\"VITA A3.5\",\"shadeTakingPhotos\":[\"shade_taking_21_1.jpg\"]}")
+DISP_ID=$(echo "$DISPUTE" | jq -r '.data.id')
+check "争议状态待判定" "$(echo "$DISPUTE" | jq -r '.data.status')" "OPEN"
+check "下单色号快照" "$(echo "$DISPUTE" | jq -r '.data.orderedShade')" "VITA A3"
+check "服务调取取色照片" "$(echo "$DISPUTE" | jq -r '.data.shadeTakingPhotos[0]')" "shade_taking_21_1.jpg"
+check "服务调取医生确认记录" "$(echo "$DISPUTE" | jq -r '.data.doctorConfirmRecord | contains("王医生")')" "true"
+check "服务调取材料批次" "$(echo "$DISPUTE" | jq -r '.data.materialBatchSummary | length > 0')" "true"
+
+# 自然光复拍
+RETAKE=$(req POST "/api/shade-disputes/$DISP_ID/natural-light-retake" "$DOCTOR" '{"naturalLightPhotos":["natural_light_21_1.jpg"],"note":"窗边自然光比对"}')
+check "自然光复拍照片" "$(echo "$RETAKE" | jq -r '.data.naturalLightPhotos[0]')" "natural_light_21_1.jpg"
+
+# 登记新材料批次
+PORC_ID=$(req GET /api/inventory/materials "$LADMIN" | jq -r '.data[] | select(.code=="PORC") | .id')
+NEW_BATCH=$(req POST "/api/inventory/materials/$PORC_ID/batches" "$LADMIN" '{"batchNo":"B-SHADE-NEW-01","qty":50,"expiryDate":"2027-09-01"}')
+NEW_BATCH_ID=$(echo "$NEW_BATCH" | jq -r '.data.id')
+
+# 判定重新制作：原件状态/去向/费用承担单独记录，保留新材料批次，返工同步质检
+DECIDED=$(req POST "/api/shade-disputes/$DISP_ID/decide" "$LADMIN" "{\"decision\":\"REMAKE\",\"remakeShade\":\"VITA A2\",\"originalDentureStatus\":\"原冠完整仅颜色偏黄\",\"originalDentureDisposition\":\"KEPT_IN_LAB\",\"costResponsibility\":\"LAB\",\"remakeCost\":200,\"newMaterialBatchId\":$NEW_BATCH_ID}")
+check "判定后重做中" "$(echo "$DECIDED" | jq -r '.data.status')" "REMAKE_IN_PROGRESS"
+check "原义齿去向单独记录" "$(echo "$DECIDED" | jq -r '.data.originalDentureDisposition')" "KEPT_IN_LAB"
+checkMoney "技工所承担重做费用" "$(echo "$DECIDED" | jq -r '.data.labShare')" "200"
+check "保留新材料批次" "$(echo "$DECIDED" | jq -r '.data.newMaterialBatchNo')" "B-SHADE-NEW-01"
+DISP_REWORK=$(echo "$DECIDED" | jq -r '.data.reworkId')
+check "返工单已建立" "$(test -n "$DISP_REWORK" && echo yes)" "yes"
+check "返工记录同步质检" "$(req GET "/api/orders/$OID3/reworks" "$DOCTOR" | jq -r ".data[] | select(.id==$DISP_REWORK) | .qcSynced")" "true"
+check "返工原因类型为色号争议" "$(req GET "/api/orders/$OID3/reworks" "$DOCTOR" | jq -r ".data[] | select(.id==$DISP_REWORK) | .reasonType")" "SHADE_DISPUTE"
+check "质检工作台可见争议返工" "$(req GET /api/shade-disputes/qc-workbench "$QC" | jq -r "[.data[] | select(.id==$DISP_ID)] | length")" "1"
+
+# 牙位重做
+stage3 MODEL_RECEIVING "$RECEIVER" ''
+stage3 SCAN_DESIGN "$TECH1" ',"note":"按VITA A2重做"';
+req POST "/api/orders/$OID3/items/$ITEM4/confirm" "$DOCTOR" '{"note":"重做色号确认"}' > /dev/null
+stage3 TEETH_ARRANGEMENT "$TECH1" ''
+stage3 SINTERING "$TECH2" ",\"materialBatchId\":$NEW_BATCH_ID,\"materialQty\":\"1\""
+stage3 POLISHING "$TECH1" ''
+stage3 QC "$QC" ''
+stage3 DELIVERY "$RECEIVER" ''
+check "重做后返工单自动关闭" "$(req GET "/api/orders/$OID3/reworks" "$DOCTOR" | jq -r ".data[] | select(.id==$DISP_REWORK) | .status")" "COMPLETED"
+
+# 重发 → 签收 → 试戴密合（反馈回同一牙位档案）
+SHIP5=$(req POST "/api/orders/$OID3/shipments" "$RECEIVER" "{\"itemIds\":[$ITEM4]}")
+SHIP5_ID=$(echo "$SHIP5" | jq -r '.data.id')
+req POST "/api/shipments/$SHIP5_ID/sign" "$CADMIN" '{"signResult":"GOOD","signedByName":"陈前台"}' > /dev/null
+req POST "/api/orders/$OID3/try-ins" "$DOCTOR" "{\"toothItemId\":$ITEM4,\"result\":\"FIT\",\"feedback\":\"重做后颜色与邻牙一致\",\"experienceScore\":5}" > /dev/null
+check "患者试戴反馈回到争议档案" "$(req GET "/api/shade-disputes/$DISP_ID" "$DOCTOR" | jq -r '.data.patientTryInScore')" "5"
+check "试戴记录关联同牙位档案" "$(req GET "/api/shade-disputes/$DISP_ID" "$DOCTOR" | jq -r '.data.tryInRecordId | type')" "number"
+
+# 医生关闭 → 质检主管复核 → 归档
+check "未关闭时质检复核被拒" "$(req POST "/api/shade-disputes/$DISP_ID/qc-review" "$QC" '{"note":"x"}' | jq -r '.success')" "false"
+CLOSED=$(req POST "/api/shade-disputes/$DISP_ID/doctor-close" "$DOCTOR" '{"note":"医生复核颜色一致，关闭"}')
+check "医生复核关闭" "$(echo "$CLOSED" | jq -r '.data.status')" "CLOSED"
+check "未质检复核时归档被拒" "$(req POST "/api/shade-disputes/$DISP_ID/archive" "$QC" '{"archiveConclusion":"x"}' | jq -r '.success')" "false"
+REVIEWED=$(req POST "/api/shade-disputes/$DISP_ID/qc-review" "$QC" '{"note":"证据链完整"}')
+check "质检主管复核" "$(echo "$REVIEWED" | jq -r '.data.status')" "QC_REVIEWED"
+ARCHIVED=$(req POST "/api/shade-disputes/$DISP_ID/archive" "$QC" '{"archiveConclusion":"色号争议成立，技工所责任，重做后一致，归档"}')
+check "质检结论归档" "$(echo "$ARCHIVED" | jq -r '.data.status')" "ARCHIVED"
+check "归档后争议异常自动解决" "$(req GET "/api/orders/$OID3/exceptions" "$DOCTOR" | jq -r '[.data[] | select(.type=="SHADE_DISPUTE")] | all(.status=="RESOLVED")')" "true"
+check "医生端牙位看板同步色号争议" "$(req GET "/api/orders/$OID3/tooth-board" "$DOCTOR" | jq -r '.data.teeth[0].shadeDisputes[0].status')" "ARCHIVED"
+
+# 结算体现技工所承担的重做费用
+SETTLE3=$(req POST "/api/orders/$OID3/settlement" "$FINANCE" '')
+checkMoney "色号争议单基础费(300×1)" "$(echo "$SETTLE3" | jq -r '.data.baseAmount')" "300"
+checkMoney "技工所承担色号重做扣减" "$(echo "$SETTLE3" | jq -r '.data.reworkLabDeduction')" "200"
+checkMoney "色号争议单应付(300-200)" "$(echo "$SETTLE3" | jq -r '.data.totalAmount')" "100"
+
 echo ""
 echo "==============================================="
 echo -e "验证结果: \033[1;32m通过 $PASS\033[0m 项, \033[1;31m失败 $FAIL\033[0m 项"

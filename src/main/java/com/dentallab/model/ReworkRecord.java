@@ -32,6 +32,35 @@ public class ReworkRecord {
     @Column(nullable = false, length = 1000)
     private String reason;
 
+    /** 返工来源分类（色号争议重做/试戴不密合/配送破损/其他）。 */
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 30)
+    private ReworkReasonType reasonType = ReworkReasonType.OTHER;
+
+    /** 色号争议返工单回指争议处理单。 */
+    @OneToOne(mappedBy = "rework", fetch = FetchType.LAZY)
+    private ShadeDispute shadeDispute;
+
+    /** 返工前原件状态描述。 */
+    @Column(length = 1000)
+    private String originalDentureStatus;
+
+    /** 返工后原义齿去向。 */
+    @Enumerated(EnumType.STRING)
+    @Column(length = 30)
+    private OriginalDentureDisposition originalDentureDisposition;
+
+    /** 重新制作使用的新材料批次。 */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "new_material_batch_id")
+    private MaterialBatch newMaterialBatch;
+
+    /** 返工记录已同步质检（色号争议返工在创建时即同步）。 */
+    @Column(nullable = false)
+    private boolean qcSynced = false;
+
+    private LocalDateTime qcSyncedAt;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     private Responsibility responsibility = Responsibility.PENDING;

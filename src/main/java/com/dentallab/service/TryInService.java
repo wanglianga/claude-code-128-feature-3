@@ -20,16 +20,18 @@ public class TryInService {
     private final ToothItemRepo itemRepo;
     private final OrderExceptionRepo exceptionRepo;
     private final ReworkRecordRepo reworkRepo;
+    private final ShadeDisputeRepo shadeDisputeRepo;
     private final AuthService authService;
 
     public TryInService(TryInRecordRepo tryInRepo, DentureOrderRepo orderRepo, ToothItemRepo itemRepo,
                         OrderExceptionRepo exceptionRepo, ReworkRecordRepo reworkRepo,
-                        AuthService authService) {
+                        ShadeDisputeRepo shadeDisputeRepo, AuthService authService) {
         this.tryInRepo = tryInRepo;
         this.orderRepo = orderRepo;
         this.itemRepo = itemRepo;
         this.exceptionRepo = exceptionRepo;
         this.reworkRepo = reworkRepo;
+        this.shadeDisputeRepo = shadeDisputeRepo;
         this.authService = authService;
     }
 
@@ -68,6 +70,20 @@ public class TryInService {
         record.setExperienceScore(experienceScore);
         tryInRepo.save(record);
 
+        // 患者试戴反馈回到同一牙位档案：若该牙位存在色号争议，回写到争议单
+        if (item != null) {
+            shadeDisputeRepo.findByToothItemIdOrderByIdAsc(item.getId()).stream()
+                    .filter(d -> !d.isArchived())
+                    .reduce((first, second) -> second)
+                    .ifPresent(dispute -> {
+                        dispute.setTryInRecord(record);
+                        dispute.setPatientTryInFeedback(feedback);
+                        dispute.setPatientTryInScore(experienceScore);
+                        dispute.setPatientTryInAt(record.getActualAt());
+                        shadeDisputeRepo.save(dispute);
+                    });
+        }
+
         List<ToothItem> targets = item != null ? List.of(item) : itemRepo.findByOrderIdOrderByIdAsc(orderId);
         if (result == TryInResult.FIT) {
             for (ToothItem t : targets) {
@@ -85,6 +101,7 @@ public class TryInService {
                     ReworkRecord rework = new ReworkRecord();
                     rework.setOrder(order);
                     rework.setToothItem(t);
+                    rework.setReasonType(ReworkReasonType.TRY_IN_MISFIT);
                     rework.setReason("试戴不密合: " + (feedback == null ? "患者试戴不密合" : feedback));
                     reworkRepo.save(rework);
                 }

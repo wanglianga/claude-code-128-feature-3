@@ -130,6 +130,7 @@ public class DeliveryService {
                     ReworkRecord rework = new ReworkRecord();
                     rework.setOrder(order);
                     rework.setToothItem(item);
+                    rework.setReasonType(ReworkReasonType.DELIVERY_DAMAGE);
                     rework.setReason("配送破损签收，需重新制作");
                     reworkRepo.save(rework);
                 }

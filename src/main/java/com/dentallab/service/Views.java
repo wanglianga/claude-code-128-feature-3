@@ -3,6 +3,7 @@ package com.dentallab.service;
 import com.dentallab.model.*;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /** 实体 → 响应 Map 的统一转换，避免暴露 JPA 懒加载代理。 */
@@ -153,6 +154,20 @@ public final class Views {
         m.put("toothItemId", r.getToothItem().getId());
         m.put("toothPosition", r.getToothItem().getToothPosition());
         m.put("reason", r.getReason());
+        m.put("reasonType", r.getReasonType().name());
+        m.put("reasonTypeLabel", r.getReasonType().getLabel());
+        m.put("shadeDisputeId", r.getShadeDispute() == null ? null : r.getShadeDispute().getId());
+        m.put("originalDentureStatus", r.getOriginalDentureStatus());
+        m.put("originalDentureDisposition", r.getOriginalDentureDisposition() == null
+                ? null : r.getOriginalDentureDisposition().name());
+        m.put("originalDentureDispositionLabel", r.getOriginalDentureDisposition() == null
+                ? null : r.getOriginalDentureDisposition().getLabel());
+        m.put("newMaterialBatchId", r.getNewMaterialBatch() == null ? null : r.getNewMaterialBatch().getId());
+        m.put("newMaterialBatchNo", r.getNewMaterialBatch() == null ? null : r.getNewMaterialBatch().getBatchNo());
+        m.put("newMaterialName", r.getNewMaterialBatch() == null
+                ? null : r.getNewMaterialBatch().getMaterial().getName());
+        m.put("qcSynced", r.isQcSynced());
+        m.put("qcSyncedAt", r.getQcSyncedAt());
         m.put("responsibility", r.getResponsibility().name());
         m.put("responsibilityLabel", r.getResponsibility().getLabel());
         m.put("status", r.getStatus().name());
@@ -166,6 +181,91 @@ public final class Views {
         m.put("createdAt", r.getCreatedAt());
         m.put("completedAt", r.getCompletedAt());
         return m;
+    }
+
+    public static Map<String, Object> shadeDispute(ShadeDispute d) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", d.getId());
+        m.put("orderId", d.getOrder().getId());
+        m.put("orderNo", d.getOrder().getOrderNo());
+        m.put("toothItemId", d.getToothItem().getId());
+        m.put("toothPosition", d.getToothItem().getToothPosition());
+        m.put("status", d.getStatus().name());
+        m.put("statusLabel", d.getStatus().getLabel());
+        m.put("patientClaim", d.getPatientClaim());
+        m.put("orderedShade", d.getOrderedShade());
+        m.put("observedShade", d.getObservedShade());
+        m.put("reportedBy", d.getReportedBy().getDisplayName());
+        m.put("reportedByRole", d.getReportedBy().getRole().name());
+        m.put("reportedAt", d.getReportedAt());
+        // 证据链
+        m.put("shadeTakingPhotos", splitPhotos(d.getShadeTakingPhotos()));
+        m.put("doctorConfirmRecord", d.getDoctorConfirmRecord());
+        m.put("materialBatchSummary", d.getMaterialBatchSummary());
+        m.put("materialBatchId", d.getMaterialBatch() == null ? null : d.getMaterialBatch().getId());
+        m.put("materialBatchNo", d.getMaterialBatch() == null ? null : d.getMaterialBatch().getBatchNo());
+        // 自然光复拍
+        m.put("naturalLightPhotos", splitPhotos(d.getNaturalLightPhotos()));
+        m.put("naturalLightNote", d.getNaturalLightNote());
+        m.put("naturalLightTakenBy", d.getNaturalLightTakenBy() == null
+                ? null : d.getNaturalLightTakenBy().getDisplayName());
+        m.put("naturalLightAt", d.getNaturalLightAt());
+        // 判定
+        m.put("decision", d.getDecision() == null ? null : d.getDecision().name());
+        m.put("decisionLabel", d.getDecision() == null ? null : d.getDecision().getLabel());
+        m.put("remakeShade", d.getRemakeShade());
+        m.put("decidedBy", d.getDecidedBy() == null ? null : d.getDecidedBy().getDisplayName());
+        m.put("decidedAt", d.getDecidedAt());
+        m.put("decisionNote", d.getDecisionNote());
+        // 返工与费用
+        m.put("reworkId", d.getRework() == null ? null : d.getRework().getId());
+        m.put("reworkStatus", d.getRework() == null ? null : d.getRework().getStatus().name());
+        m.put("originalDentureStatus", d.getOriginalDentureStatus());
+        m.put("originalDentureDisposition", d.getOriginalDentureDisposition() == null
+                ? null : d.getOriginalDentureDisposition().name());
+        m.put("originalDentureDispositionLabel", d.getOriginalDentureDisposition() == null
+                ? null : d.getOriginalDentureDisposition().getLabel());
+        m.put("costResponsibility", d.getCostResponsibility() == null ? null : d.getCostResponsibility().name());
+        m.put("costResponsibilityLabel", d.getCostResponsibility() == null
+                ? null : d.getCostResponsibility().getLabel());
+        m.put("remakeCost", d.getRemakeCost());
+        m.put("clinicShare", d.getClinicShare());
+        m.put("labShare", d.getLabShare());
+        m.put("newMaterialBatchId", d.getNewMaterialBatch() == null ? null : d.getNewMaterialBatch().getId());
+        m.put("newMaterialBatchNo", d.getNewMaterialBatch() == null ? null : d.getNewMaterialBatch().getBatchNo());
+        m.put("newMaterialName", d.getNewMaterialBatch() == null
+                ? null : d.getNewMaterialBatch().getMaterial().getName());
+        // 患者试戴反馈
+        m.put("patientTryInFeedback", d.getPatientTryInFeedback());
+        m.put("patientTryInScore", d.getPatientTryInScore());
+        m.put("patientTryInAt", d.getPatientTryInAt());
+        m.put("tryInRecordId", d.getTryInRecord() == null ? null : d.getTryInRecord().getId());
+        // 医生复核关闭
+        m.put("doctorClosed", d.isDoctorClosed());
+        m.put("doctorClosedBy", d.getDoctorClosedBy() == null ? null : d.getDoctorClosedBy().getDisplayName());
+        m.put("doctorClosedAt", d.getDoctorClosedAt());
+        m.put("doctorCloseNote", d.getDoctorCloseNote());
+        // 质检主管复核
+        m.put("qcReviewed", d.isQcReviewed());
+        m.put("qcReviewedBy", d.getQcReviewedBy() == null ? null : d.getQcReviewedBy().getDisplayName());
+        m.put("qcReviewedAt", d.getQcReviewedAt());
+        m.put("qcReviewNote", d.getQcReviewNote());
+        // 归档
+        m.put("archived", d.isArchived());
+        m.put("archivedBy", d.getArchivedBy() == null ? null : d.getArchivedBy().getDisplayName());
+        m.put("archivedAt", d.getArchivedAt());
+        m.put("archiveConclusion", d.getArchiveConclusion());
+        m.put("createdAt", d.getCreatedAt());
+        m.put("updatedAt", d.getUpdatedAt());
+        return m;
+    }
+
+    private static List<String> splitPhotos(String photos) {
+        if (photos == null || photos.isBlank()) {
+            return List.of();
+        }
+        return java.util.Arrays.stream(photos.split(","))
+                .map(String::trim).filter(s -> !s.isEmpty()).collect(java.util.stream.Collectors.toList());
     }
 
     public static Map<String, Object> material(Material mat, java.math.BigDecimal remaining) {

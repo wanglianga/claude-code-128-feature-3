@@ -35,13 +35,14 @@ public class ProductionService {
     private final ReworkRecordRepo reworkRepo;
     private final ShipmentRepo shipmentRepo;
     private final TryInRecordRepo tryInRepo;
+    private final ShadeDisputeRepo shadeDisputeRepo;
     private final AuthService authService;
 
     public ProductionService(DentureOrderRepo orderRepo, ToothItemRepo itemRepo, StageRecordRepo stageRepo,
                              MaterialBatchRepo batchRepo, DesignAnnotationRepo annotationRepo,
                              OrderExceptionRepo exceptionRepo, ReworkRecordRepo reworkRepo,
                              ShipmentRepo shipmentRepo, TryInRecordRepo tryInRepo,
-                             AuthService authService) {
+                             ShadeDisputeRepo shadeDisputeRepo, AuthService authService) {
         this.orderRepo = orderRepo;
         this.itemRepo = itemRepo;
         this.stageRepo = stageRepo;
@@ -51,6 +52,7 @@ public class ProductionService {
         this.reworkRepo = reworkRepo;
         this.shipmentRepo = shipmentRepo;
         this.tryInRepo = tryInRepo;
+        this.shadeDisputeRepo = shadeDisputeRepo;
         this.authService = authService;
     }
 
@@ -186,6 +188,7 @@ public class ProductionService {
         Map<String, Object> board = new LinkedHashMap<>();
         board.put("order", Views.order(order));
         List<ReworkRecord> orderReworks = reworkRepo.findByOrderIdOrderByIdAsc(orderId);
+        List<ShadeDispute> orderDisputes = shadeDisputeRepo.findByOrderIdOrderByIdAsc(orderId);
         List<Map<String, Object>> teeth = new ArrayList<>();
         for (ToothItem item : itemRepo.findByOrderIdOrderByIdAsc(orderId)) {
             Map<String, Object> tooth = Views.item(item);
@@ -196,9 +199,14 @@ public class ProductionService {
             tooth.put("reworks", orderReworks.stream()
                     .filter(r -> r.getToothItem().getId().equals(item.getId()))
                     .map(Views::rework).collect(Collectors.toList()));
+            tooth.put("shadeDisputes", orderDisputes.stream()
+                    .filter(d -> d.getToothItem().getId().equals(item.getId()))
+                    .map(Views::shadeDispute).collect(Collectors.toList()));
             teeth.add(tooth);
         }
         board.put("teeth", teeth);
+        board.put("shadeDisputes", orderDisputes.stream()
+                .map(Views::shadeDispute).collect(Collectors.toList()));
         board.put("shipments", shipmentRepo.findByOrderIdOrderByIdDesc(orderId).stream()
                 .map(Views::shipment).collect(Collectors.toList()));
         board.put("tryIns", tryInRepo.findByOrderIdOrderByIdAsc(orderId).stream()
